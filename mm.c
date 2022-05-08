@@ -90,6 +90,8 @@ void mm_free(void *ptr);
 void *mm_realloc(void *ptr, size_t size);
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
+static void *find_fit(size_t asize);
+static void place(void *bp, size_t asize);
 
 /* 
  * mm_init - initialize the malloc package.
@@ -105,7 +107,7 @@ int mm_init(void)
     PUT(heap_listp, 0);                                 // 미사용 패딩 워드
     PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));        // 프롤로그 헤더
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));        // 프롤로그 푸터
-    PUT(heap_listp, 0);                                 // 에필로그 헤더
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1));            // 에필로그 헤더
     heap_listp += (2*WSIZE);
 
     /* CHUNKSIZE 바이트의 가용한 블럭만큼 비어있는 힙을 늘려줌 */
@@ -130,7 +132,7 @@ static void *extend_heap(size_t words)
     /* 새로 할당한 블록의 헤더, 푸터, 에필로그 헤더를 초기화 */
     PUT(HDRP(bp), PACK(size, 0));                       // 헤더
     PUT(FTRP(bp), PACK(size, 0));                       // 푸터
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(size, 1));            // 에필로그 헤더
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));            // 에필로그 헤더
 
     /* 이전 블럭이 가용상태이면 연결 */
     return coalesce(bp);
@@ -144,13 +146,79 @@ static void *extend_heap(size_t words)
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-	return NULL;
+    size_t asize;       // 조정된 블럭 사이즈
+    size_t extendsize;  // 맞지 않을 때 늘려준 힙의 양
+    char *bp;
+
+    // 가짜 요청을 무시
+    if (size == 0){
+        return NULL;
+    }
+
+    // 오버헤드와 정렬 조건을 맞추기 위해 블럭 사이즈 조정
+    if (size <= DSIZE){
+        asize = 2 * DSIZE;
+    } else {
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
+    }
+
+    // 적절한 가용 블럭을 가용 리스트에서 검색하여 요청 블럭을 가용 블럭의 시작 부분에 배치
+    if ((bp = find_fit(asize)) != NULL){
+        place(bp, asize);
+        return bp;
+    } 
+
+    // 잘 맞는 가용블럭을 찾지 못할 때, 블럭에 더 메모리를 늘려서 배치
+    extendsize = MAX(asize, CHUNKSIZE);
+    if ((bp = extend_heap(extendsize/WSIZE)) == NULL){
+        return NULL;
+    }
+    place(bp, asize);
+    return bp;
+
+}
+
+/* 묵시적 가용 리스트에서 크기가 적합한 가용 블럭 검색 수행 */
+static void *find_fit(size_t asize){
+
+    /* First-fit search */
+    void *bp;
+
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+            return bp;
+        }
+    }
+
+    return NULL; /* No fit */
+  
+    // 내가 짰던 코드
+    // char *bp = heap_listp + (4*WSIZE); // 예외처리 필요할 듯
+    // while (힙의 전체 길이 >= FTRP(bp) + WSIZE){ // 힙의 전체 길이 어떻게?
+    //     if (GET_ALLOC(HDRP(bp)) == 1){
+    //         bp = NEXT_BLKP(bp);
+    //     } else {
+    //         if (GET_SIZE(HDRP(bp)) >= asize){
+    //             return (void *) bp;
+    //         }
+    //     }
+    // }
+}
+
+/* 요청한 블럭을 가용 블럭의 시작부분에 배치 = 즉 할당된 상태인 1로 만들어주기 */
+static void place(void *bp, size_t asize){
+    size_t csize = GET_SIZE(HDRP(bp));  // 할당된 전체 크기
+
+    if ((csize - asize) >= (2*DSIZE)){  // 할당된 전체 크기 - 조정된 크기 >= 최소 블럭 크기 
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize - asize, 0));
+        PUT(FTRP(bp), PACK(csize - asize, 0));
+    }
     else {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
     }
 }
 
@@ -172,13 +240,19 @@ static void *coalesce(void *bp)
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_ALLOC(HDRP(bp));
+    size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc){
         return bp;
     }
+    else if (prev_alloc && !next_alloc){
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
+    }
     else if (!prev_alloc && next_alloc){
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
@@ -187,47 +261,53 @@ static void *coalesce(void *bp)
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
-    }
-
+    } 
     return bp;
     
 }
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- * 내가 늘리고 싶은 블럭 size와 기존 
  */
+
+// void *mm_realloc(void *bp, size_t size){
+//     if(size <= 0){ 
+//         mm_free(bp);
+//         return 0;
+//     }
+//     if(bp == NULL){
+//         return mm_malloc(size); 
+//     }
+//     void *newp = mm_malloc(size); 
+//     if(newp == NULL){
+//         return 0;
+//     }
+//     size_t oldsize = GET_SIZE(HDRP(bp));
+//     if(size < oldsize){
+//     	oldsize = size; 
+// 	}
+//     memcpy(newp, bp, oldsize); 
+//     mm_free(bp);
+//     return newp;
+// }
+
 void *mm_realloc(void *ptr, size_t size)
 {
     void *oldptr = ptr;
     void *newptr;
-    size_t copySize;                                    // adjusted block size
-    
+    size_t copySize;
     newptr = mm_malloc(size);
-
     if (newptr == NULL)
-      return NULL;
-    
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    
+        return NULL;
+    copySize = GET_SIZE(HDRP(oldptr));
     if (size < copySize)
-      copySize = size;
-    
+    {
+        copySize = size;
+    }
     memcpy(newptr, oldptr, copySize);
-    
     mm_free(oldptr);
-    
     return newptr;
 }
-
-
-
-
-
-
-
-
-
 
 
 
