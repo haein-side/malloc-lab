@@ -20,6 +20,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -82,6 +83,8 @@ team_t team = {
 
 // 프롤로그 블럭을 가리키는 변수
 static void *heap_listp = NULL;
+// 마지막 검색 종료된 지점을 가리키는 정적 전역 변수
+static char *last_search = NULL;    
 
 // 함수 프로토타입 선언
 int mm_init(void);
@@ -108,6 +111,7 @@ int mm_init(void)
     PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));        // 프롤로그 헤더
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));        // 프롤로그 푸터
     PUT(heap_listp + (3*WSIZE), PACK(0, 1));            // 에필로그 헤더
+    last_search = heap_listp;                           // last_search는 결국 내 블럭 이후 가용한 블럭을 찾는 것 -> 현재 내 블럭의 bp를 넣어주고 NEXT_BLKP(last_search)를 next_fit() 함수 안에서 해주면 됨
     heap_listp += (2*WSIZE);
 
     /* CHUNKSIZE 바이트의 가용한 블럭만큼 비어있는 힙을 늘려줌 */
@@ -178,25 +182,31 @@ void *mm_malloc(size_t size)
 
 }
 
-/* 묵시적 가용 리스트에서 크기가 적합한 가용 블럭 검색 수행 - best fit 방법 */
+/* 묵시적 가용 리스트에서 크기가 적합한 가용 블럭 검색 수행 */
 static void *find_fit(size_t asize){
-
-    /* Best-fit search */
-    // 모든 가용 블럭 검사하며 크기가 가장 맞는 가장 작은 블럭 선택
+    /* Next-fit search */
+    // 이전 검색이 종료된 지점에서 검색 시작
+    // 끝 지점(epilogue block)까지 원하는 지점을 못 만나면 시작 지점(prologue block)부터 bp까지 다시 탐색
     void *bp;
-    void *tmp = NULL;
-    int min_cha = 999999;
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){  // 에필로그 블럭의 헤더의 크기가 0이므로 종료조건
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){     // GET_ALLOC(HDRP(bp)) 가 가용해서 0(False)이면 !GET_ALLOC(HDRP(bp))는 True
-            if ((GET_SIZE(HDRP(bp)) - asize) < min_cha){
-                min_cha = GET_SIZE(HDRP(bp)) - asize; 
-                tmp = bp;
-            }                                             // 내가 원하는 조정된 사이즈 asize <= 헤더에 저장된 블럭 크기
+
+    // 처음 검색한 경우가 아닐 때
+    // 프롤로그 블럭 이전까지 가용 블럭 찾을 경우 리턴값 있음
+    bool searchSucc = false;  // 검색 성공 시 true로
+    for (bp = NEXT_BLKP(last_search); GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){ // last_search한 다음 부분이 시작 지점
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){                // GET_ALLOC(HDRP(bp)) 가 가용해서 0(False)이면 !GET_ALLOC(HDRP(bp))는 True
+            searchSucc = true;                                                     // 검색 성공했으므로 true로 변환
+            last_search = bp;                                                      // 마지막 검색 종료된 지점 저장
+            return bp;                                                             // 내가 원하는 조정된 사이즈 asize <= 헤더에 저장된 블럭 크기
         }
     }
-
-    if (tmp != NULL){
-        return tmp;     
+    // 프롤로그 블럭 이후에도 가용 블럭 못 찾을 때
+    if (!searchSucc){
+        for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){         // 에필로그 블럭의 헤더의 크기가 0이므로 종료조건
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){            // GET_ALLOC(HDRP(bp)) 가 가용해서 0(False)이면 !GET_ALLOC(HDRP(bp))는 True
+                last_search = bp;                                                  // 마지막 검색 종료된 지점 저장
+                return bp;                                                         // 내가 원하는 조정된 사이즈 asize <= 헤더에 저장된 블럭 크기
+            }
+        }
     }
 
     return NULL; /* No fit */
@@ -244,6 +254,7 @@ static void *coalesce(void *bp)
 
     // case 1. 직전: 할당, 직후: 할당
     if (prev_alloc && next_alloc){
+        last_search = bp;  
         return bp;
     }
     // case 2. 직전: 할당, 직후: 가용
@@ -266,6 +277,8 @@ static void *coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp); // 직전 블럭의 bp로 bp 갱신 필요
     } 
+
+    last_search = bp;
     return bp;
     
 }
@@ -295,6 +308,7 @@ void *mm_realloc(void *ptr, size_t size)
         copySize = size;
     }
     memcpy(newptr, oldptr, copySize); // newptr에 oldptr을 시작으로 copySize만큼의 메모리 값을 복사함
+    last_search = newptr;
     mm_free(oldptr);    // 기존의 힙을 반환함
     return newptr;
 }

@@ -178,29 +178,31 @@ void *mm_malloc(size_t size)
 
 }
 
-/* 묵시적 가용 리스트에서 크기가 적합한 가용 블럭 검색 수행 - best fit 방법 */
+/* 묵시적 가용 리스트에서 크기가 적합한 가용 블럭 검색 수행 - first fit 방법 */
 static void *find_fit(size_t asize){
 
-    /* Best-fit search */
-    // 모든 가용 블럭 검사하며 크기가 가장 맞는 가장 작은 블럭 선택
+    /* First-fit search */
     void *bp;
-    void *tmp = NULL;
-    int min_cha = 999999;
+
     for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){  // 에필로그 블럭의 헤더의 크기가 0이므로 종료조건
         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){     // GET_ALLOC(HDRP(bp)) 가 가용해서 0(False)이면 !GET_ALLOC(HDRP(bp))는 True
-            if ((GET_SIZE(HDRP(bp)) - asize) < min_cha){
-                min_cha = GET_SIZE(HDRP(bp)) - asize; 
-                tmp = bp;
-            }                                             // 내가 원하는 조정된 사이즈 asize <= 헤더에 저장된 블럭 크기
+            return bp;                                                  // 내가 원하는 조정된 사이즈 asize <= 헤더에 저장된 블럭 크기
         }
     }
 
-    if (tmp != NULL){
-        return tmp;     
-    }
-
     return NULL; /* No fit */
-
+  
+    // 내가 짰던 코드
+    // char *bp = heap_listp + (4*WSIZE); // 예외처리 필요할 듯
+    // while (힙의 전체 길이 >= FTRP(bp) + WSIZE){ // 힙의 전체 길이 어떻게?
+    //     if (GET_ALLOC(HDRP(bp)) == 1){
+    //         bp = NEXT_BLKP(bp);
+    //     } else {
+    //         if (GET_SIZE(HDRP(bp)) >= asize){
+    //             return (void *) bp;
+    //         }
+    //     }
+    // }
 }
 
 /* 요청한 블럭을 가용 블럭의 시작부분에 배치 = 즉 할당된 상태인 1로 만들어주기 */
